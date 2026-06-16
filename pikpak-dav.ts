@@ -1,8 +1,47 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const { createClient, AuthType } = require("webdav");
-const CryptoJs = require("crypto-js");
-const axios = require("axios");
+import { createClient, AuthType } from "webdav";
+import * as CryptoJs from "crypto-js";
+import axios from "axios";
+
+// ———— 本地类型 ————
+type NameOrder = "artist-title" | "title-artist";
+
+/** 精简后的文件项（只保留拼播放地址/解析所需）。 */
+interface RawFile {
+    id: string; // 绝对 WebDAV 路径
+    basename: string;
+}
+
+/** WebDAV PROPFIND 返回的条目（我们用到的字段）。 */
+interface DavStat {
+    type: "file" | "directory";
+    basename: string;
+    filename: string;
+    mime?: string;
+}
+
+/** webdav 客户端的薄接口（库本身按 any 处理，这里只声明我们用到的方法）。 */
+interface DavClient {
+    getDirectoryContents(path: string, opts?: any): Promise<DavStat[]>;
+    getFileDownloadLink?(path: string): string;
+}
+
+/** 我们产出的歌曲项（MusicFree 会再补 platform 等字段）。 */
+interface MusicItem {
+    id: string;
+    title: string;
+    artist: string;
+    album: string;
+}
+
+interface CachedData {
+    username?: string;
+    password?: string;
+    searchPath?: string;
+    searchPathList?: string[];
+    fileList?: RawFile[] | null;
+    lyricCache?: Record<string, string | null>;
+    sheetCache?: Record<string, MusicItem[]>;
+}
 
 // PikPak 原生 WebDAV 地址（固定）。在 PikPak App -> 设置 -> 实验功能 中开启 WebDAV，
 // 会生成专用的 WebDAV 用户名/密码（与账号登录密码不同），填入下方用户变量即可。
@@ -27,13 +66,13 @@ const AUDIO_EXTS = [
     ".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".ape", ".wma", ".opus",
 ];
 
-let cachedData = {};
+let cachedData: CachedData = {};
 
-function getUserVariables() {
+function getUserVariables(): Record<string, string> {
     return (env && env.getUserVariables && env.getUserVariables()) || {};
 }
 
-function authHeader(username, password) {
+function authHeader(username: string, password: string): string {
     const token = CryptoJs.enc.Base64.stringify(
         CryptoJs.enc.Utf8.parse(`${username}:${password}`)
     );
@@ -41,8 +80,12 @@ function authHeader(username, password) {
 }
 
 // 并发池：用 limit 个 worker 共享索引消费 items，保持结果顺序。
-async function mapPool(items, limit, fn) {
-    const results = new Array(items.length);
+async function mapPool<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T, idx: number) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
     let cursor = 0;
     const workers = new Array(Math.min(limit, items.length)).fill(0).map(
         async () => {
@@ -58,7 +101,7 @@ async function mapPool(items, limit, fn) {
 
 // 创建/复用 WebDAV 客户端；用户变量变化时使缓存失效。
 // 注意：nameOrder 不参与缓存键——歌手/标题在读取时才解析，改顺序无需重扫。
-function getClient() {
+function getClient(): DavClient | null {
     const { username, password, searchPath } = getUserVariables();
     if (!(username && password)) {
         return null;
@@ -85,27 +128,27 @@ function getClient() {
         authType: AuthType.Password,
         username,
         password,
-    });
+    }) as DavClient;
 }
 
-function getSearchPathList() {
+function getSearchPathList(): string[] {
     return cachedData.searchPathList && cachedData.searchPathList.length
         ? cachedData.searchPathList
         : [DEFAULT_PATH];
 }
 
-function basenameOf(path) {
+function basenameOf(path: string): string {
     const trimmed = (path || "").replace(/\/+$/, "");
     const idx = trimmed.lastIndexOf("/");
     return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
-function hasAudioExt(name) {
+function hasAudioExt(name: string): boolean {
     const lower = (name || "").toLowerCase();
     return AUDIO_EXTS.some((ext) => lower.endsWith(ext));
 }
 
-function isAudio(file) {
+function isAudio(file: DavStat): boolean {
     return (
         file.type === "file" &&
         (((file.mime || "").startsWith("audio")) || hasAudioExt(file.basename))
@@ -113,7 +156,7 @@ function isAudio(file) {
 }
 
 // 读取用户配置的命名顺序："标题-歌手" 或默认 "歌手-标题"。
-function getNameOrder() {
+function getNameOrder(): NameOrder {
     const { nameOrder } = getUserVariables();
     const s = (nameOrder || "").trim().toLowerCase().replace(/\s/g, "");
     if (s === "标题-歌手" || s === "title-artist" || s.startsWith("标题")) {
@@ -125,7 +168,7 @@ function getNameOrder() {
 // 把文件名（已去扩展名）按分隔符拆成两段。
 // 优先匹配两侧带空格的连字符（如 "Jay-Z - 晴天" 能正确在 " - " 处断开），
 // 否则退而匹配第一个裸连字符；支持 - – — 三种横线。
-function splitName(nameNoExt) {
+function splitName(nameNoExt: string): [string, string] | null {
     let m = nameNoExt.match(/^(.*?)\s+[-–—]\s+(.*)$/);
     if (m && m[1].trim() && m[2].trim()) {
         return [m[1].trim(), m[2].trim()];
@@ -138,7 +181,10 @@ function splitName(nameNoExt) {
 }
 
 // 从文件名解析歌手/标题。order 决定两段的归属。
-function parseName(basename, order) {
+function parseName(
+    basename: string,
+    order: NameOrder
+): { artist: string; title: string } {
     const dot = basename.lastIndexOf(".");
     const nameNoExt = dot > 0 ? basename.slice(0, dot) : basename;
     const parts = splitName(nameNoExt);
@@ -153,7 +199,7 @@ function parseName(basename, order) {
 }
 
 // file 为精简后的 { id, basename }；order 为当前命名顺序。
-function toMusicItem(file, order) {
+function toMusicItem(file: RawFile, order: NameOrder): MusicItem {
     const { artist, title } = parseName(file.basename, order);
     return {
         id: file.id, // 绝对 WebDAV 路径，getMediaSource 据此拼播放地址
@@ -164,9 +210,9 @@ function toMusicItem(file, order) {
 }
 
 // 把若干原始文件列表去重、精简为 { id, basename }[]。
-function flattenFiles(fileGroups) {
-    const seen = new Set();
-    const list = [];
+function flattenFiles(fileGroups: DavStat[][]): RawFile[] {
+    const seen = new Set<string>();
+    const list: RawFile[] = [];
     for (const files of fileGroups) {
         for (const file of files) {
             if (!seen.has(file.filename)) {
@@ -180,7 +226,7 @@ function flattenFiles(fileGroups) {
 
 // 递归收集某个目录下的全部音频文件，返回原始文件对象数组。
 // 优先用一次深度 PROPFIND（Depth: infinity）；PikPak 不支持/失败时回退为“逐层并发 BFS”。
-async function scanFolder(client, root) {
+async function scanFolder(client: DavClient, root: string): Promise<DavStat[]> {
     // 1) 尝试一次性深度遍历
     try {
         const all = await client.getDirectoryContents(root, { deep: true });
@@ -198,8 +244,8 @@ async function scanFolder(client, root) {
     }
 
     // 2) 逐层并发 BFS：每层用 mapPool 并发拉取，吞掉单个目录的错误。
-    const result = [];
-    let level = [root];
+    const result: DavStat[] = [];
+    let level: string[] = [root];
     let depth = 0;
     let visited = 0;
     while (level.length && visited < MAX_FOLDERS) {
@@ -209,10 +255,10 @@ async function scanFolder(client, root) {
             try {
                 return await client.getDirectoryContents(path);
             } catch (e) {
-                return [];
+                return [] as DavStat[];
             }
         });
-        const nextLevel = [];
+        const nextLevel: string[] = [];
         for (const entries of listings) {
             for (const entry of entries) {
                 if (entry.type === "directory") {
@@ -231,12 +277,12 @@ async function scanFolder(client, root) {
 }
 
 // 扫描某个目录并精简为 { id, basename }[]。
-async function scanFolderSlim(client, root) {
+async function scanFolderSlim(client: DavClient, root: string): Promise<RawFile[]> {
     return flattenFiles([await scanFolder(client, root)]);
 }
 
 // 扫描所有配置路径，得到原始文件列表（带缓存，整个会话复用）。
-async function loadFileList() {
+async function loadFileList(): Promise<RawFile[]> {
     const client = getClient();
     if (!client) {
         return [];
@@ -244,7 +290,7 @@ async function loadFileList() {
     if (cachedData.fileList) {
         return cachedData.fileList;
     }
-    const groups = [];
+    const groups: DavStat[][] = [];
     for (const path of getSearchPathList()) {
         groups.push(await scanFolder(client, path));
     }
@@ -255,16 +301,16 @@ async function loadFileList() {
 // —— 歌词编码处理（UTF-8 / GBK 自动识别）——
 // 沙箱无 iconv、Hermes 无 ICU（TextDecoder('gbk') 不可用），故自带一张运行时下载的
 // GBK 码点表（gbk-index.json，与插件同仓库托管）；逐文件自动判别 UTF-8 / GBK。
-let gbkIndex = null; // 缓存的 GBK 码点表（用户无关、常量，跨会话复用）
-let gbkIndexPromise = null; // 进行中的下载，避免并发重复请求
+let gbkIndex: number[] | null = null; // 缓存的 GBK 码点表（用户无关、常量，跨会话复用）
+let gbkIndexPromise: Promise<number[] | null> | null = null; // 进行中的下载，避免并发重复请求
 
 // 下载并缓存 GBK 表（最多下一次）。失败时返回 null（回退 UTF-8）。
-async function loadGbkIndex() {
+async function loadGbkIndex(): Promise<number[] | null> {
     if (gbkIndex) return gbkIndex;
     if (!gbkIndexPromise) {
         gbkIndexPromise = axios
             .get(GBK_INDEX_URL, { timeout: 20000 })
-            .then((res) => {
+            .then((res: any) => {
                 const data = res.data;
                 const arr = typeof data === "string" ? JSON.parse(data) : data;
                 if (Array.isArray(arr) && arr.length) {
@@ -279,9 +325,9 @@ async function loadGbkIndex() {
 }
 
 // crypto-js WordArray -> 字节数组
-function wordArrayToBytes(wa) {
-    const words = wa.words;
-    const sigBytes = wa.sigBytes;
+function wordArrayToBytes(wa: any): Uint8Array {
+    const words: number[] = wa.words;
+    const sigBytes: number = wa.sigBytes;
     const out = new Uint8Array(sigBytes);
     for (let i = 0; i < sigBytes; i++) {
         out[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
@@ -290,7 +336,7 @@ function wordArrayToBytes(wa) {
 }
 
 // 把 axios 返回的多种形态（Buffer / ArrayBuffer / base64 字符串）统一成 Uint8Array
-function toBytes(data) {
+function toBytes(data: any): Uint8Array {
     if (data == null) return new Uint8Array(0);
     if (data instanceof Uint8Array) return data; // Node Buffer 也是 Uint8Array
     if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) {
@@ -316,20 +362,20 @@ function toBytes(data) {
     }
 }
 
-function codePointToStr(cp) {
+function codePointToStr(cp: number): string {
     if (cp <= 0xffff) return String.fromCharCode(cp);
     cp -= 0x10000;
     return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
 }
 
 // 字节序列是否为合法 UTF-8（纯 ASCII 也返回 true）
-function isLikelyUtf8(bytes) {
+function isLikelyUtf8(bytes: Uint8Array): boolean {
     const n = bytes.length;
     let i = 0;
     while (i < n) {
         const b = bytes[i];
         if (b < 0x80) { i++; continue; }
-        let need;
+        let need: number;
         if (b >= 0xc2 && b <= 0xdf) need = 1;
         else if (b >= 0xe0 && b <= 0xef) need = 2;
         else if (b >= 0xf0 && b <= 0xf4) need = 3;
@@ -344,13 +390,14 @@ function isLikelyUtf8(bytes) {
     return true;
 }
 
-function decodeUtf8(bytes) {
+function decodeUtf8(bytes: Uint8Array): string {
     let out = "";
     let i = 0;
     const n = bytes.length;
     while (i < n) {
         const b = bytes[i];
-        let cp, len;
+        let cp: number;
+        let len: number;
         if (b < 0x80) { cp = b; len = 1; }
         else if (b >= 0xc2 && b <= 0xdf) { cp = b & 0x1f; len = 2; }
         else if (b >= 0xe0 && b <= 0xef) { cp = b & 0x0f; len = 3; }
@@ -365,7 +412,7 @@ function decodeUtf8(bytes) {
 }
 
 // 按 WHATWG gb18030 双字节指针公式解码（覆盖 GBK）
-function decodeGbk(bytes, index) {
+function decodeGbk(bytes: Uint8Array, index: number[]): string {
     let out = "";
     let i = 0;
     const n = bytes.length;
@@ -390,7 +437,7 @@ function decodeGbk(bytes, index) {
 }
 
 // 字节 -> 文本：处理 BOM，自动识别 UTF-8 / GBK
-async function decodeLyricBytes(bytes) {
+async function decodeLyricBytes(bytes: Uint8Array): Promise<string> {
     if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
         return decodeUtf8(bytes.subarray(3)); // UTF-8 BOM
     }
@@ -403,17 +450,19 @@ async function decodeLyricBytes(bytes) {
 // 读取并解码与音频同名的 .lrc 歌词。返回 { rawLrc } 或 null（无歌词）。
 // 用 axios 按字节获取（带 Authorization 头）——与播放同样的成熟链路，axios 会自动
 // 跟随 PikPak 的 302 跳转到 CDN；显式 timeout 覆盖全局 2s 默认。
-async function fetchBytes(lrcPath, auth) {
+async function fetchBytes(lrcPath: string, auth: string): Promise<Uint8Array> {
     const res = await axios.get(DAV_BASE + encodeURI(lrcPath), {
         headers: { Authorization: auth },
         timeout: 15000,
         responseType: "arraybuffer",
-        transformResponse: (data) => data,
+        transformResponse: (data: any) => data,
     });
     return toBytes(res.data);
 }
 
-async function loadLyric(musicItem) {
+async function loadLyric(
+    musicItem: IMusic.IMusicItemBase
+): Promise<ILyric.ILyricSource | null> {
     if (!musicItem || !musicItem.id) {
         return null;
     }
@@ -421,16 +470,18 @@ async function loadLyric(musicItem) {
     if (!(username && password)) {
         return null;
     }
-    const cache = cachedData.lyricCache || (cachedData.lyricCache = {});
+    const cache: Record<string, string | null> =
+        cachedData.lyricCache || (cachedData.lyricCache = {});
     const id = musicItem.id;
     if (Object.prototype.hasOwnProperty.call(cache, id)) {
         // 命中缓存（含“无歌词”的负缓存）
-        return cache[id] ? { rawLrc: cache[id] } : null;
+        const cached = cache[id];
+        return cached ? { rawLrc: cached } : null;
     }
 
     // 候选路径：① 把扩展名换成 .lrc；② 整名后再追加 .lrc（适配 x.mp3.lrc）
     const dot = id.lastIndexOf(".");
-    const candidates = [];
+    const candidates: string[] = [];
     if (dot > 0) {
         candidates.push(id.slice(0, dot) + ".lrc");
     }
@@ -457,16 +508,19 @@ async function loadLyric(musicItem) {
 }
 
 // 歌曲排序：先按歌手，再按标题（locale 比较，中文友好）。
-function byArtistTitle(a, b) {
+function byArtistTitle(a: MusicItem, b: MusicItem): number {
     const ar = (a.artist || "").localeCompare(b.artist || "");
     return ar !== 0 ? ar : (a.title || "").localeCompare(b.title || "");
 }
 
 // 实时构建某歌单的歌曲列表（不走 loadFileList 会话缓存，确保反映 PikPak 当前增删）。
-async function buildSheetMusicList(client, sheetId) {
+async function buildSheetMusicList(
+    client: DavClient,
+    sheetId: string
+): Promise<MusicItem[]> {
     const roots = sheetId === ALL_SHEET_ID ? getSearchPathList() : [sheetId];
     const order = getNameOrder();
-    const groups = [];
+    const groups: DavStat[][] = [];
     for (const root of roots) {
         groups.push(await scanFolder(client, root));
     }
@@ -475,7 +529,9 @@ async function buildSheetMusicList(client, sheetId) {
     return list;
 }
 
-async function searchMusic(query) {
+async function searchMusic(
+    query: string
+): Promise<{ isEnd: boolean; data: MusicItem[] }> {
     const fileList = await loadFileList();
     const order = getNameOrder();
     const library = fileList.map((f) => toMusicItem(f, order));
@@ -490,10 +546,14 @@ async function searchMusic(query) {
     return { isEnd: true, data };
 }
 
-module.exports = {
+const pluginInstance = {
     platform: "PikPak",
     author: "east",
-    version: "0.0.4",
+    version: "0.0.5",
+    // 自更新源：指向仓库里构建产物 pikpak-dav.js 的 raw 地址。
+    // 配置后，插件列表里该插件会出现“更新”按钮，点一下即从此地址拉取最新代码。
+    srcUrl:
+        "https://raw.githubusercontent.com/cheedonghu/musicfree-plugin/main/pikpak-dav.js",
     description:
         "PikPak 网盘音乐源。请先在 PikPak App -> 设置 -> 实验功能 中开启 WebDAV，使用其生成的 WebDAV 专用账号/密码（需会员）。可在榜单里按顶层文件夹浏览，或用搜索检索整库；在“导入歌单”中输入某个目录路径可将其导入为本地歌单。歌词：把与歌曲同名的 .lrc 文件放在同一目录即可自动显示（自动识别 UTF-8/GBK 编码）。",
     cacheControl: "no-cache",
@@ -524,10 +584,11 @@ module.exports = {
             hint: "填“歌手-标题”(默认) 或“标题-歌手”，按你的命名习惯决定哪段是歌手",
         },
     ],
-    search(query, page, type) {
+    search(query: string, page: number, type: string) {
         if (type === "music") {
             return searchMusic(query);
         }
+        return undefined;
     },
     // 懒加载浏览：每个配置根目录用一次 Depth:1 列出顶层子文件夹作为入口，
     // 不触发全库扫描；点进去（getTopListDetail）才扫描该文件夹。
@@ -536,9 +597,9 @@ module.exports = {
         if (!client) {
             return [];
         }
-        const groups = [];
+        const groups: Array<{ title: string; data: Array<{ id: string; title: string }> }> = [];
         for (const root of getSearchPathList()) {
-            let entries;
+            let entries: DavStat[];
             try {
                 entries = await client.getDirectoryContents(root);
             } catch (e) {
@@ -557,10 +618,10 @@ module.exports = {
         }
         return groups;
     },
-    async getTopListDetail(topListItem) {
+    async getTopListDetail(topListItem: IMusic.IMusicSheetItemBase) {
         const client = getClient();
         if (!client) {
-            return { ...topListItem, musicList: [] };
+            return { ...topListItem, musicList: [] as MusicItem[] };
         }
         const files = await scanFolderSlim(client, topListItem.id);
         const order = getNameOrder();
@@ -570,7 +631,7 @@ module.exports = {
         };
     },
     // 返回 WebDAV 地址 + Authorization 头，由播放器自动跟随 PikPak 的 302 跳转到 CDN。
-    getMediaSource(musicItem) {
+    getMediaSource(musicItem: IMusic.IMusicItemBase): IPlugin.IMediaSourceResult | null {
         const { username, password } = getUserVariables();
         if (!(username && password)) {
             return null;
@@ -583,7 +644,7 @@ module.exports = {
         };
     },
     // 读取与音频文件同名的 .lrc 歌词（需将歌词文件与歌曲放在同一目录、同名）。
-    getLyric(musicItem) {
+    getLyric(musicItem: IMusic.IMusicItemBase) {
         return loadLyric(musicItem);
     },
     // —— 可收藏的“实时歌单”（推荐歌单入口）——
@@ -608,7 +669,7 @@ module.exports = {
             ],
         };
     },
-    async getMusicSheetInfo(sheetItem, page) {
+    async getMusicSheetInfo(sheetItem: IMusic.IMusicSheetItem, page: number) {
         // sheetItem.id 缺失时退回“全部歌曲”，避免从收藏冷启动时拿不到 id 而空列表。
         const sheetId = (sheetItem && sheetItem.id) || ALL_SHEET_ID;
         const client = getClient();
@@ -622,8 +683,9 @@ module.exports = {
             // 凭据未就绪：返回 null 让详情页进入可重试状态（用户下拉/重试即可恢复）。
             return null;
         }
-        const cache = cachedData.sheetCache || (cachedData.sheetCache = {});
-        let list;
+        const cache: Record<string, MusicItem[]> =
+            cachedData.sheetCache || (cachedData.sheetCache = {});
+        let list: MusicItem[];
         if (!page || page <= 1) {
             // 第 1 页：实时重新扫描，反映当前增删
             list = await buildSheetMusicList(client, sheetId);
@@ -642,7 +704,7 @@ module.exports = {
     },
     // 把某个目录递归导入为本地歌单（静态快照；源文件增删不会自动同步，需重新导入）。
     // urlLike 为要导入的目录路径，留空则使用配置的根目录。
-    async importMusicSheet(urlLike) {
+    async importMusicSheet(urlLike: string) {
         const client = getClient();
         if (!client) {
             return null;
@@ -650,7 +712,7 @@ module.exports = {
         const roots = urlLike && urlLike.trim()
             ? [urlLike.trim()]
             : getSearchPathList();
-        const groups = [];
+        const groups: DavStat[][] = [];
         for (const root of roots) {
             groups.push(await scanFolder(client, root));
         }
@@ -658,3 +720,5 @@ module.exports = {
         return flattenFiles(groups).map((f) => toMusicItem(f, order));
     },
 };
+
+export = pluginInstance;

@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2017", "DOM"],
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "outDir": ".",
+    "removeComments": false,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["pikpak-dav.ts", "types/**/*.d.ts"],
+  "exclude": ["node_modules", "debug.mock.js"]
+}

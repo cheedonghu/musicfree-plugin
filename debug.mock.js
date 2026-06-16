@@ -172,7 +172,7 @@ global.env = {
 // ════════════════════════════════════════════════════════════════════════
 // 3) 运行场景：想调试哪个方法就改这里
 // ════════════════════════════════════════════════════════════════════════
-const plugin = require("./pikpak-dav.src.js"); // 调试可读源码（Node 支持 async）
+const plugin = require("./pikpak-dav.js"); // 构建产物（先 npm run build；可借 sourcemap 在 .ts 上断点）
 const dump = (label, v) => console.log(`\n== ${label} ==\n` + JSON.stringify(v, null, 2));
 
 (async () => {

@@ -93,28 +93,27 @@ https://raw.githubusercontent.com/cheedonghu/musicfree-plugin/main/pikpak-dav.js
 
 ## 构建（重要）
 
-手机端 MusicFree 用 Hermes 的 `Function()` **动态编译**插件代码，而 Hermes 的 eval **不支持 `async/await` 语法**（直接导入手写 async 代码会报 `async functions are unsupported`）。因此：
+手机端 MusicFree 用 Hermes 的 `Function()` **动态编译**插件代码，而 Hermes 的 eval **不支持 `async/await` 语法**（直接导入手写 async 代码会报 `async functions are unsupported`）。因此源码用 **TypeScript** 写，再用 `tsc` 编译成 Hermes 可用的 **ES5**（`async/await` 由 tsc 的 `__awaiter`/`__generator` 状态机处理，不含 `function*`）：
 
-- **可读源码**：`pikpak-dav.src.js`（在这里改代码）。
-- **导入用文件**：`pikpak-dav.js`（由构建脚本把 async/await 降级为 Promise 后生成，**不要手动编辑**）。
+- **可读源码**：`pikpak-dav.ts`（在这里改代码，带类型）。
+- **导入用文件**：`pikpak-dav.js`（`tsc` 编译产物，**不要手动编辑**）。
+- 类型定义在 `types/`（`globals.d.ts` + 从 MusicFree vendor 的 `types/musicfree/*.d.ts`）。
 
-改完源码后重新构建：
+改完源码后重新构建（构建即类型检查，类型错会失败）：
 
 ```bash
-npm install      # 首次
-npm run build    # 生成 pikpak-dav.js
+npm install        # 首次
+npm run build      # tsc 编译 -> pikpak-dav.js
+npm run typecheck  # 只做类型检查（可选）
 ```
-
-构建用 `babel-plugin-transform-async-to-promises`，只降级 async/await（不引入 generator/regenerator），其余语法保持不变。
 
 ## 本地开发 / 调试
 
-仓库内提供 `debug.mock.js`：用假的 `webdav`/`crypto-js`/`axios` 替换真实依赖，自己编一棵目录树，**不联网、不需要真账号**即可调试扫描/解析/缓存/歌词等逻辑（直接跑可读源码 `pikpak-dav.src.js`）。
+仓库内提供 `debug.mock.js`：用假的 `webdav`/`crypto-js`/`axios` 替换真实依赖，自己编一棵目录树，**不联网、不需要真账号**即可调试扫描/解析/缓存/歌词等逻辑。它加载**构建产物** `pikpak-dav.js`，所以先 `npm run build`。
 
 ```bash
-node debug.mock.js
-# 打断点：在 pikpak-dav.src.js 里写 debugger; 然后
-node inspect debug.mock.js          # 命令行调试器
+npm run build && node debug.mock.js
+# 打断点：tsconfig 已开 sourceMap，可在 VS Code 里直接在 pikpak-dav.ts 上下断点
 node --inspect-brk debug.mock.js    # 配合 Chrome / VS Code
 ```
 
