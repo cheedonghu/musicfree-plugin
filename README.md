@@ -2,7 +2,7 @@
 
 一个把 **PikPak 网盘**作为音乐源接入 [MusicFree](https://github.com/maotoumao/MusicFree) 的插件。通过 PikPak 原生 WebDAV 读取你网盘里的音乐，支持搜索、按文件夹浏览、播放、歌词（自动识别 UTF-8/GBK）、导入歌单，以及一个**会自动反映增删的"实时歌单"**。
 
-> 插件文件：`pikpak-dav.js`　·　歌词解码表：`gbk-index.json`
+> 导入用文件：`pikpak-dav.js`（由 `pikpak-dav.src.js` 构建生成）　·　歌词解码表：`gbk-index.json`
 
 ---
 
@@ -91,13 +91,29 @@ https://raw.githubusercontent.com/cheedonghu/musicfree-plugin/main/pikpak-dav.js
 
 ---
 
+## 构建（重要）
+
+手机端 MusicFree 用 Hermes 的 `Function()` **动态编译**插件代码，而 Hermes 的 eval **不支持 `async/await` 语法**（直接导入手写 async 代码会报 `async functions are unsupported`）。因此：
+
+- **可读源码**：`pikpak-dav.src.js`（在这里改代码）。
+- **导入用文件**：`pikpak-dav.js`（由构建脚本把 async/await 降级为 Promise 后生成，**不要手动编辑**）。
+
+改完源码后重新构建：
+
+```bash
+npm install      # 首次
+npm run build    # 生成 pikpak-dav.js
+```
+
+构建用 `babel-plugin-transform-async-to-promises`，只降级 async/await（不引入 generator/regenerator），其余语法保持不变。
+
 ## 本地开发 / 调试
 
-仓库内提供 `debug.mock.js`：用假的 `webdav`/`crypto-js`/`axios` 替换真实依赖，自己编一棵目录树，**不联网、不需要真账号**即可调试扫描/解析/缓存/歌词等逻辑。
+仓库内提供 `debug.mock.js`：用假的 `webdav`/`crypto-js`/`axios` 替换真实依赖，自己编一棵目录树，**不联网、不需要真账号**即可调试扫描/解析/缓存/歌词等逻辑（直接跑可读源码 `pikpak-dav.src.js`）。
 
 ```bash
 node debug.mock.js
-# 打断点：在 pikpak-dav.js 里写 debugger; 然后
+# 打断点：在 pikpak-dav.src.js 里写 debugger; 然后
 node inspect debug.mock.js          # 命令行调试器
 node --inspect-brk debug.mock.js    # 配合 Chrome / VS Code
 ```
