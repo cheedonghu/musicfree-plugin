@@ -19,6 +19,9 @@ const DEFAULT_PATH = "/music";
 // “全部歌曲”实时歌单的哨兵 id（覆盖所有配置的根目录）。
 const ALL_SHEET_ID = "pikpak://all";
 const SHEET_PAGE_SIZE = 100;
+// GBK 歌词解码表地址（与插件同仓库托管，需用 raw 原始地址，不能用 GitHub blob 页面）。
+const GBK_INDEX_URL =
+    "https://raw.githubusercontent.com/cheedonghu/musicfree-plugin/main/gbk-index.json";
 
 const AUDIO_EXTS = [
     ".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".ape", ".wma", ".opus",
@@ -255,27 +258,12 @@ async function loadFileList() {
 let gbkIndex = null; // 缓存的 GBK 码点表（用户无关、常量，跨会话复用）
 let gbkIndexPromise = null; // 进行中的下载，避免并发重复请求
 
-function getGbkIndexUrl() {
-    const { gbkIndexUrl } = getUserVariables();
-    return (gbkIndexUrl || "").trim();
-}
-
-function getLyricEncoding() {
-    const { lyricEncoding } = getUserVariables();
-    const s = (lyricEncoding || "").trim().toLowerCase();
-    if (s === "utf-8" || s === "utf8") return "utf-8";
-    if (s === "gbk" || s === "gb2312" || s === "gb18030") return "gbk";
-    return "auto";
-}
-
-// 下载并缓存 GBK 表（最多下一次）。未配置 URL 或失败时返回 null。
+// 下载并缓存 GBK 表（最多下一次）。失败时返回 null（回退 UTF-8）。
 async function loadGbkIndex() {
     if (gbkIndex) return gbkIndex;
-    const url = getGbkIndexUrl();
-    if (!url) return null;
     if (!gbkIndexPromise) {
         gbkIndexPromise = axios
-            .get(url, { timeout: 20000 })
+            .get(GBK_INDEX_URL, { timeout: 20000 })
             .then((res) => {
                 const data = res.data;
                 const arr = typeof data === "string" ? JSON.parse(data) : data;
@@ -401,18 +389,12 @@ function decodeGbk(bytes, index) {
     return out;
 }
 
-// 字节 -> 文本：处理 BOM、强制编码、自动识别
+// 字节 -> 文本：处理 BOM，自动识别 UTF-8 / GBK
 async function decodeLyricBytes(bytes) {
     if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
         return decodeUtf8(bytes.subarray(3)); // UTF-8 BOM
     }
-    const force = getLyricEncoding();
-    if (force === "utf-8") return decodeUtf8(bytes);
-    if (force === "gbk") {
-        const index = await loadGbkIndex();
-        return index ? decodeGbk(bytes, index) : decodeUtf8(bytes);
-    }
-    // auto：先验 UTF-8，否则尝试 GBK（表不可用则回退 UTF-8）
+    // 先验 UTF-8，否则尝试 GBK（表不可用则回退 UTF-8）
     if (isLikelyUtf8(bytes)) return decodeUtf8(bytes);
     const index = await loadGbkIndex();
     return index ? decodeGbk(bytes, index) : decodeUtf8(bytes);
@@ -513,7 +495,7 @@ module.exports = {
     author: "east",
     version: "0.0.4",
     description:
-        "PikPak 网盘音乐源。请先在 PikPak App -> 设置 -> 实验功能 中开启 WebDAV，使用其生成的 WebDAV 专用账号/密码（需会员）。可在榜单里按顶层文件夹浏览，或用搜索检索整库；在“导入歌单”中输入某个目录路径可将其导入为本地歌单。歌词：把与歌曲同名的 .lrc 文件放在同一目录即可自动显示（自动识别 UTF-8/GBK，GBK 需配置“GBK 表地址”）。",
+        "PikPak 网盘音乐源。请先在 PikPak App -> 设置 -> 实验功能 中开启 WebDAV，使用其生成的 WebDAV 专用账号/密码（需会员）。可在榜单里按顶层文件夹浏览，或用搜索检索整库；在“导入歌单”中输入某个目录路径可将其导入为本地歌单。歌词：把与歌曲同名的 .lrc 文件放在同一目录即可自动显示（自动识别 UTF-8/GBK 编码）。",
     cacheControl: "no-cache",
     supportedSearchType: ["music"],
     hints: {
@@ -540,16 +522,6 @@ module.exports = {
             key: "nameOrder",
             name: "文件名顺序",
             hint: "填“歌手-标题”(默认) 或“标题-歌手”，按你的命名习惯决定哪段是歌手",
-        },
-        {
-            key: "gbkIndexUrl",
-            name: "GBK 表地址",
-            hint: "指向与插件同仓库的 gbk-index.json 原始地址；留空则歌词仅按 UTF-8 解析",
-        },
-        {
-            key: "lyricEncoding",
-            name: "歌词编码",
-            hint: "留空=自动识别；可填 utf-8 或 gbk 强制",
         },
     ],
     search(query, page, type) {
